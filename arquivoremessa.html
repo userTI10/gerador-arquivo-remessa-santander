@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gerador Remessa CNAB240 via XLSX</title>
+  <script src="xlsx.min.js"></script>
+  <style>
+    body{font-family:sans-serif;background:#0b1220;color:#eaf2ff;margin:0;padding:20px}
+    .card{background:#111a2b;padding:16px;margin-bottom:16px;border-radius:12px}
+    h1{margin:0 0 12px}
+    button{padding:10px 20px;border:none;border-radius:8px;cursor:pointer}
+    .primary{background:#1e83ff;color:white}
+    .ghost{background:#0e1627;color:#eaf2ff;border:1px solid #2a3753}
+    .codes{white-space:pre-wrap;background:#0a1322;padding:12px;border-radius:8px;max-height:300px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h1>Gerador de Arquivo Remessa CNAB240 – XLSX</h1>
+  <div class="card">
+    <h3>Carregar Planilha</h3>
+    <input type="file" id="file" accept=".xlsx,.xls" />
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <button class="primary" id="gerar" onclick="gerar()" disabled>Gerar arquivo .TXT</button>
+    <button class="ghost" id="download" onclick="baixar()" disabled>Baixar .TXT</button>
+  </div>
+
+  <div class="card">
+    <h3>Prévia</h3>
+    <div id="preview" class="codes"></div>
+  </div>
+
+<script>
+let dadosPlanilha = null;
+let linhasGeradas = [];
+
+const onlyDigits = s => (s||'').toString().replace(/\D+/g,'');
+const toAsciiUpper = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Za-z0-9 ]/g,'').toUpperCase();
+const padLeft = (s,len,ch='0') => (s+'').slice(0,len).padStart(len,ch);
+const padRight = (s,len,ch=' ') => (s+'').slice(0,len).padEnd(len,ch);
+const cents = v => Math.round(parseFloat(v||0)*100);
+const fmtDate = d => { 
+  if (!d) return '00000000'; 
+  const dt = new Date(d); 
+  if(isNaN(dt)) return '00000000'; 
+  const dd=String(dt.getDate()).padStart(2,'0'); 
+  const mm=String(dt.getMonth()+1).padStart(2,'0'); 
+  const yyyy=dt.getFullYear(); 
+  return dd+mm+yyyy; 
+};
+
+function validarCPF(cpf) {
+    cpf = String(cpf).replace(/[^\d]+/g,'');
+    if(cpf == '') return false;	
+    if (cpf.length != 11 || /^(\d)\1+$/.test(cpf)) return false;
+    let add = 0;
+    for (let i=0; i < 9; i ++) add += parseInt(cpf.charAt(i)) * (10 - i);
+    let rev = 11 - (add % 11);
+    if (rev == 10 || rev == 11) rev = 0;
+    if (rev != parseInt(cpf.charAt(9))) return false;
+    add = 0;
+    for (let i = 0; i < 10; i ++) add += parseInt(cpf.charAt(i)) * (11 - i);
+    rev = 11 - (add % 11);
+    if (rev == 10 || rev == 11) rev = 0;
+    if (rev != parseInt(cpf.charAt(10))) return false;
+    return true;
+}
+
+function validarCNPJ(cnpj) {
+  cnpj = String(cnpj).replace(/[^\d]+/g,'');
+  if(cnpj == '') return false;
+  if (cnpj.length != 14) return false;
+  if (/^(\d)\1+$/.test(cnpj)) return false;
+  let tamanho = cnpj.length - 2
+  let numeros = cnpj.substring(0,tamanho);
+  let digitos = cnpj.substring(tamanho);
+  let soma = 0;
+  let pos = tamanho - 7;
+  for (let i = tamanho; i >= 1; i--) {
+    soma += numeros.charAt(tamanho - i) * pos--;
+    if (pos < 2) pos = 9;
+  }
+  let resultado = soma % 11 < 2 ? 0 : 11 - soma % 11;
+  if (resultado != digitos.charAt(0)) return false;
+  tamanho = tamanho + 1;
+  numeros = cnpj.substring(0,tamanho);
+  soma = 0;
+  pos = tamanho - 7;
+  for (let i = tamanho; i >= 1; i--) {
+    soma += numeros.charAt(tamanho - i) * pos--;
+    if (pos < 2) pos = 9;
+  }
+  resultado = soma % 11 < 2 ? 0 : 11 - soma % 11;
+  if (resultado != digitos.charAt(1)) return false;
+  return true;
+}
+
+// ===== Leitura XLSX =====
+document.getElementById("file").addEventListener("change", function(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    try {
+      const data = new Uint8Array(ev.target.result);
+      const workbook = XLSX.read(data,{type:'array'});
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(sheet,{defval:""});
+      
+      if (!json || json.length === 0) {
+        alert('A planilha não contém dados ou está em formato inválido!');
+        return;
+      }
+      
+      dadosPlanilha = json;
+      document.getElementById('status').textContent = `Planilha carregada com ${json.length} registros.`;
+      document.getElementById('gerar').disabled = false;
+    } catch (error) {
+      console.error('Erro ao processar planilha:', error);
+      alert(`Erro ao processar planilha: ${error.message}`);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+// ===== Geradores =====
+function headerArquivo(d){
+  let s='';
+  s+='033';                               // 001-003 Banco
+  s+='0000';                              // 004-007 Lote
+  s+='0';                                 // 008-008 Registro
+  s+=padRight('',9);                      // 009-017 Filler
+  s+=d.TIPO_INSCRICAO_EMPRESA;            // 018-018 Tipo Inscrição
+  s+=padLeft(onlyDigits(d["CODIGO IDENTIFICACAO CPF/CNPJ"]||''),14); // 019-032 CNPJ/CPF
+  
+  // Validação e formatação correta do convênio para o Santander
+  const convenio = onlyDigits(d["NUMERO CONVENIO"]||'');
+  if (!convenio) {
+    console.warn("ATENÇÃO: Número do convênio não informado no header do arquivo");
+  }
+  s+=padLeft(convenio,20);  // 033-052 Convênio
+  
+  s+=padLeft(onlyDigits(d["AGENCIA"]||''),5);   // 053-057 Agência
+  s+=padRight(d["AGENCIA DV"]||'',1);     // 058-058 DV Agência
+  s+=padLeft(onlyDigits(d["CONTA"]||''),12);    // 059-070 Conta
+  s+=padRight(d["CONTA DV"]||'',1);       // 071-071 DV Conta
+  s+=' ';                                 // 072-072 DV Ag/Conta
+  s+=padRight(toAsciiUpper(d["NOME DO CLIENTE"]||''),30); // 073-102 Nome Empresa
+  s+=padRight('BANCO SANTANDER',30);       // 103-132 Nome Banco
+  s+=padRight('',10);                     // 133-142 Filler
+  s+='1';                                 // 143-143 Remessa/Retorno
+  const hoje = new Date();
+  s+=fmtDate(hoje);                       // 144-151 Data Geração
+  s+=padLeft(hoje.getHours(),2)+padLeft(hoje.getMinutes(),2)+padLeft(hoje.getSeconds(),2); // 152-157 Hora Geração
+  s+=padLeft('000999',6);                 // 158-163 Sequencial (valor fixo conforme especificação)
+  s+='060';                               // 164-166 Versão Layout
+  s+=padLeft('0',5);                      // 167-171 Densidade
+  s+=padRight('',20);                     // 172-191 Reservado Banco
+  s+=padRight('',20);                     // 192-211 Reservado Empresa
+  s+=padRight('',29);                     // 212-240 Filler
+  return s;
+}
+
+function headerLote(d){
+  let s='';
+  s+='033';                               // 001-003 Banco
+  s+='0001';                              // 004-007 Lote
+  s+='1';                                 // 008-008 Registro
+  s+='C';                                 // 009-009 Operação
+  s+=padLeft(d["TIPO DE SERVICO"]||'20',2); // 010-011 Serviço
+  s+=padLeft(d["FORMA DE PAGAMENTO"]||'31',2); // 012-013 Forma
+  s+='030';                               // 014-016 Layout
+  s+=' ';                                 // 017-017 Filler
+  s+=d.TIPO_INSCRICAO_EMPRESA;            // 018-018 Tipo Inscrição
+  s+=padLeft(onlyDigits(d["CODIGO IDENTIFICACAO CPF/CNPJ"]||''),14); // 019-032 CNPJ/CPF
+  
+  // Validação e formatação correta do convênio para o Santander
+  const convenio = onlyDigits(d["NUMERO CONVENIO"]||'');
+  if (!convenio) {
+    console.warn("ATENÇÃO: Número do convênio não informado no header de lote");
+  }
+  s+=padLeft(convenio,20);  // 033-052 Convênio
+  s+=padLeft(onlyDigits(d["AGENCIA"]||''),5);   // 053-057 Agência
+  s+=padRight(d["AGENCIA DV"]||'',1);     // 058-058 DV Agência
+  s+=padLeft(onlyDigits(d["CONTA"]||''),12);    // 059-070 Conta
+  s+=padRight(d["CONTA DV"]||'',1);       // 071-071 DV Conta
+  s+=' ';                                 // 072-072 DV Ag/Conta
+  s+=padRight(toAsciiUpper(d["NOME DO CLIENTE"]||''),30); // 073-102 Nome Empresa
+  s+=padRight('',40);                     // 103-142 Mensagem
+  s+=padRight(toAsciiUpper(d["ENDERECO CLIENTE"]||''),30); // 143-172 Endereço
+  s+=padLeft(onlyDigits(d["NUMERO ENDERECO CLIENTE"]||''),5); // 173-177 Número
+  s+=padRight(toAsciiUpper(d["COMPLEMENTO ENDERECO CLIENTE"]||''),15); // 178-192 Complemento
+  s+=padRight(toAsciiUpper(d["CIDADE CLIENTE"]||''),20); // 193-212 Cidade
+  s+=padLeft(onlyDigits(d["CEP CLIENTE"]||''),8); // 213-220 CEP
+  s+=padRight(toAsciiUpper(d["UF CLIENTE"]||''),2); // 221-222 UF
+  s+=padRight('',8);                      // 223-230 Filler
+  s+=padRight('',10);                     // 231-240 Ocorrências
+  return s;
+}
+
+function segmentoJ(idx,d){
+  let s='';
+  s+='033';                 // 001-003 Banco
+  s+='0001';                // 004-007 Lote
+  s+='3';                   // 008-008 Registro
+  s+=padLeft(idx,5);        // 009-013 Sequencial
+  s+='J';                   // 014-014 Segmento
+  s+='0';                   // 015-015 Movimento (corrigido de espaço para 0)
+  s+='00';                  // 016-017 Instrução
+  
+  // Leitura do código de barras da planilha
+  const codigoBarras = onlyDigits(d["CODIGO DE BARRAS"]||'');
+  
+  // Validação do código de barras
+  if (codigoBarras.length !== 44) {
+    console.warn(`Código de barras com tamanho incorreto: ${codigoBarras.length} (esperado: 44)`);
+  }
+  
+  s+=padLeft(codigoBarras, 44, '0');  // 018-061 Código de Barras (garantindo 44 dígitos)
+  s+=padRight(toAsciiUpper(d["NOME FAVORECIDO"]||''),30); // 062-091 Beneficiário
+  s+=fmtDate(d["DATA DE VENCIMENTO"]);    // 092-099 Vencimento
+  s+=padLeft(cents(d["VALOR DO TITULO"]),15); // 100-114 Valor Nominal
+  s+=padLeft(cents(d["VALOR DO DESCONTO"]),15);       // 115-129 Desconto
+  s+=padLeft(cents(d["VALOR DA MORA"]),15);       // 130-144 Multa
+  s+=fmtDate(d["DATA DO PAGAMENTO"]);    // 145-152 Data Pagamento
+  s+=padLeft(cents(d["VALOR DO PAGAMENTO"]),15); // 153-167 Valor Pagamento
+  s+=padLeft('0',15);       // 168-182 Quantidade Moeda
+  s+=padRight(d["SEU NUMERO"]||'',20); // 183-202 Documento Cliente
+  s+=padRight('',20);       // 203-222 Documento Banco
+  s+='09';                  // 223-224 Código Moeda (Real)
+  s+=padRight('',6);        // 225-230 Filler
+  s+=padRight('',10);       // 231-240 Ocorrências
+  return s;
+}
+
+function segmentoJ52(idx,d){
+  let s='';
+  s+='033';                 // 001-003 Banco
+  s+='0001';                // 004-007 Lote
+  s+='3';                   // 008-008 Registro
+  s+=padLeft(idx,5);        // 009-013 Sequencial
+  s+='J';                   // 014-014 Segmento
+  s+='5';                   // 015-015 Tipo
+  s+='2';                   // 016-016 Movimento
+  s+='02';                  // 017-018 Identificação
+  // Pagador
+  s+=d.TIPO_INSCRICAO_EMPRESA; // 019-019 Tipo Inscrição
+  s+=padLeft(onlyDigits(d["CODIGO IDENTIFICACAO CPF/CNPJ"]||''),14); // 020-033 CNPJ/CPF
+  s+=padRight(toAsciiUpper(d["NOME DO CLIENTE"]||''),40);             // 034-073 Nome
+  // Beneficiário
+  s+='2';                   // 074-074 Tipo Inscrição (Pode ser melhorado para validar CPF/CNPJ do favorecido também)
+  const codBeneficiario = onlyDigits(d["CODIGO IDENTIFICACAO FAVORECIDO"]||'');
+  s+=padLeft(codBeneficiario,14); // 075-088 CNPJ
+  s+=padRight(toAsciiUpper(d["NOME FAVORECIDO"]||''),40);             // 089-128 Nome
+  // Sacador
+  s+='0';                   // 129-129 Tipo Inscrição
+  s+=padLeft('0',14);       // 130-143 CNPJ
+  s+=padRight('',40);       // 144-183 Nome
+  s+=padRight('',53);       // 184-236 Filler
+  s+=padRight('',4);        // 237-240 Complemento para garantir 240 caracteres
+  return s;
+}
+
+function trailerLote(qtd,soma){
+  let s='';
+  s+='033';                      // 001-003 Banco
+  s+='0001';                     // 004-007 Lote
+  s+='5';                        // 008-008 Registro
+  s+=padRight('',9);             // 009-017 Filler
+  s+=padLeft(qtd,6);             // 018-023 Quantidade Registros
+  s+=padLeft(cents(soma),18);    // 024-041 Somatória Valores
+  s+=padLeft('0',18);            // 042-059 Quantidade Moeda
+  s+=padLeft('0',6);             // 060-065 Número Aviso
+  s+=padRight('',165);           // 066-230 Filler
+  s+=padRight('',10);            // 231-240 Ocorrências
+  return s;
+}
+
+function trailerArquivo(lotes,registros,d){
+  let s='';
+  s+='033';                // 001-003 Banco
+  s+='9999';               // 004-007 Lote
+  s+='9';                  // 008-008 Registro
+  s+=padRight('',9);       // 009-017 Filler
+  s+=padLeft(lotes,6);     // 018-023 Quantidade Lotes
+  s+=padLeft(registros,6); // 024-029 Quantidade Registros
+  s+=padLeft('0',6);       // 030-035 Qtde Contas Concil
+  
+  // Incluindo código de convênio/estação no trailer do arquivo
+  const convenio = onlyDigits(d["NUMERO CONVENIO"]||'');
+  s+=padLeft(convenio,20); // 036-055 Convênio/Código de Estação
+  
+  s+=padRight('',185);     // 056-240 Filler
+  return s;
+}
+
+// ===== Montar =====
+function gerar(){
+  if(!dadosPlanilha || !dadosPlanilha.length){
+    alert("Carregue um XLSX primeiro!");
+    return;
+  }
+  
+  const docEmpresa = onlyDigits(dadosPlanilha[0]['CODIGO IDENTIFICACAO CPF/CNPJ']);
+  let tipoInscricaoEmpresa = '';
+
+  if (docEmpresa.length === 11) {
+    if (!validarCPF(docEmpresa)) {
+      alert(`CPF da empresa inválido: "${docEmpresa}". Verifique a coluna 'CODIGO IDENTIFICACAO CPF/CNPJ' na sua planilha.`);
+      return;
+    }
+    tipoInscricaoEmpresa = '1';
+  } else if (docEmpresa.length === 14) {
+    if (!validarCNPJ(docEmpresa)) {
+      alert(`CNPJ da empresa inválido: "${docEmpresa}". Verifique a coluna 'CODIGO IDENTIFICACAO CPF/CNPJ' na sua planilha.`);
+      return;
+    }
+    tipoInscricaoEmpresa = '2';
+  } else {
+    alert(`Documento da empresa (CPF/CNPJ) com tamanho inválido: "${docEmpresa}". Deve ter 11 ou 14 dígitos. Verifique a coluna 'CODIGO IDENTIFICACAO CPF/CNPJ'.`);
+    return;
+  }
+
+  // Verificar se o número do convênio está presente
+  if (!dadosPlanilha[0]['NUMERO CONVENIO']) {
+    alert("O número do convênio é obrigatório. Verifique a coluna 'NUMERO CONVENIO' na sua planilha.");
+    return;
+  }
+
+  const registros = dadosPlanilha;
+  // Adiciona o tipo de inscrição em todos os registros para facilitar o acesso
+  registros.forEach(r => r.TIPO_INSCRICAO_EMPRESA = tipoInscricaoEmpresa);
+
+  let linhas=[];
+
+  linhas.push(headerArquivo(registros[0]));
+  linhas.push(headerLote(registros[0]));
+
+  let soma=0;
+  let qtdRegistrosLote = 2;
+  
+  registros.forEach((r,i)=> {
+    if(!r["VALOR DO PAGAMENTO"]) return;
+    
+    try {
+      // Verificar se o código de barras está presente
+      if (!r["CODIGO DE BARRAS"]) {
+        throw new Error("Código de barras não encontrado");
+      }
+      
+      const valor = parseFloat(r["VALOR DO PAGAMENTO"]||0);
+      soma += isNaN(valor) ? 0 : valor;
+      
+      qtdRegistrosLote++;
+      linhas.push(segmentoJ(qtdRegistrosLote, r));
+      
+      qtdRegistrosLote++;
+      linhas.push(segmentoJ52(qtdRegistrosLote, r));
+
+    } catch(e) {
+      console.error('Erro ao processar linha ' + i, e, r);
+      alert('Erro ao processar linha ' + (i+1) + ': ' + e.message);
+      return;
+    }
+  });
+
+  linhas.push(trailerLote(qtdRegistrosLote + 1, soma));
+  linhas.push(trailerArquivo(1, linhas.length + 1, registros[0]));
+
+  // Validação rigorosa do tamanho das linhas
+  for(let i=0; i<linhas.length; i++) {
+    if(linhas[i].length !== 240) {
+      console.error('Linha ' + (i+1) + ' com tamanho incorreto: ' + linhas[i].length, linhas[i]);
+      alert('Erro: Linha ' + (i+1) + ' com tamanho incorreto: ' + linhas[i].length + ' (esperado: 240)');
+      return;
+    }
+  }
+
+  linhasGeradas = linhas;
+  document.getElementById("preview").innerText = linhas.join("\n");
+  document.getElementById("download").disabled = false;
+}
+
+function baixar(){
+  if(linhasGeradas.length === 0){
+    alert("Nada gerado ainda!");
+    return;
+  }
+  const blob = new Blob([linhasGeradas.join("\n")],{type:"text/plain"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; 
+  a.download = "remessa.txt"; 
+  a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+
+</body>
+</html>
