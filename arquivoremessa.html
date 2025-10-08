@@ -44,7 +44,20 @@ const padRight = (s,len,ch=' ') => (s+'').slice(0,len).padEnd(len,ch);
 const cents = v => Math.round(parseFloat(v||0)*100);
 const fmtDate = d => { 
   if (!d) return '00000000'; 
-  const dt = new Date(d); 
+  // Tenta converter a data para o formato correto
+  let dt;
+  if (typeof d === 'string' && d.includes('/')) {
+    // Se for uma string no formato DD/MM/YYYY
+    const parts = d.split('/');
+    if (parts.length === 3) {
+      dt = new Date(parts[2], parts[1]-1, parts[0]);
+    } else {
+      dt = new Date(d);
+    }
+  } else {
+    dt = new Date(d);
+  }
+  
   if(isNaN(dt)) return '00000000'; 
   const dd=String(dt.getDate()).padStart(2,'0'); 
   const mm=String(dt.getMonth()+1).padStart(2,'0'); 
@@ -138,11 +151,9 @@ function headerArquivo(d){
   s+=padLeft(onlyDigits(d["CODIGO IDENTIFICACAO CPF/CNPJ"]||''),14); // 019-032 CNPJ/CPF
   
   // Validação e formatação correta do convênio para o Santander
-  const convenio = onlyDigits(d["NUMERO CONVENIO"]||'');
-  if (!convenio) {
-    console.warn("ATENÇÃO: Número do convênio não informado no header do arquivo");
-  }
-  s+=padLeft(convenio,20);  // 033-052 Convênio
+  // O convênio deve ser preenchido com zeros para o Santander
+  // Conforme especificação, este campo deve ser preenchido com zeros
+  s+=padLeft('0',20);  // 033-052 Convênio (preenchido com zeros conforme especificação)
   
   s+=padLeft(onlyDigits(d["AGENCIA"]||''),5);   // 053-057 Agência
   s+=padRight(d["AGENCIA DV"]||'',1);     // 058-058 DV Agência
@@ -179,11 +190,8 @@ function headerLote(d){
   s+=padLeft(onlyDigits(d["CODIGO IDENTIFICACAO CPF/CNPJ"]||''),14); // 019-032 CNPJ/CPF
   
   // Validação e formatação correta do convênio para o Santander
-  const convenio = onlyDigits(d["NUMERO CONVENIO"]||'');
-  if (!convenio) {
-    console.warn("ATENÇÃO: Número do convênio não informado no header de lote");
-  }
-  s+=padLeft(convenio,20);  // 033-052 Convênio
+  // O convênio deve ser preenchido com zeros para o Santander
+  s+=padLeft('0',20);  // 033-052 Convênio (preenchido com zeros conforme especificação)
   s+=padLeft(onlyDigits(d["AGENCIA"]||''),5);   // 053-057 Agência
   s+=padRight(d["AGENCIA DV"]||'',1);     // 058-058 DV Agência
   s+=padLeft(onlyDigits(d["CONTA"]||''),12);    // 059-070 Conta
@@ -209,25 +217,38 @@ function segmentoJ(idx,d){
   s+='3';                   // 008-008 Registro
   s+=padLeft(idx,5);        // 009-013 Sequencial
   s+='J';                   // 014-014 Segmento
-  s+='0';                   // 015-015 Movimento (corrigido de espaço para 0)
+  s+='1';                   // 015-015 Movimento (1=Entrada de títulos)
   s+='00';                  // 016-017 Instrução
   
   // Leitura do código de barras da planilha
-  const codigoBarras = onlyDigits(d["CODIGO DE BARRAS"]||'');
+  let codigoBarras = onlyDigits(d["CODIGO DE BARRAS"]||'');
   
   // Validação do código de barras
   if (codigoBarras.length !== 44) {
     console.warn(`Código de barras com tamanho incorreto: ${codigoBarras.length} (esperado: 44)`);
+    // Tenta corrigir o código de barras se possível
+    if (codigoBarras.length > 44) {
+      codigoBarras = codigoBarras.substring(0, 44);
+    } else if (codigoBarras.length < 44) {
+      codigoBarras = padLeft(codigoBarras, 44, '0');
+    }
   }
   
-  s+=padLeft(codigoBarras, 44, '0');  // 018-061 Código de Barras (garantindo 44 dígitos)
+  s+=codigoBarras;  // 018-061 Código de Barras (exatamente 44 dígitos)
   s+=padRight(toAsciiUpper(d["NOME FAVORECIDO"]||''),30); // 062-091 Beneficiário
   s+=fmtDate(d["DATA DE VENCIMENTO"]);    // 092-099 Vencimento
-  s+=padLeft(cents(d["VALOR DO TITULO"]),15); // 100-114 Valor Nominal
-  s+=padLeft(cents(d["VALOR DO DESCONTO"]),15);       // 115-129 Desconto
-  s+=padLeft(cents(d["VALOR DA MORA"]),15);       // 130-144 Multa
+  
+  // Garantindo que os valores estão corretamente formatados
+  const valorTitulo = d["VALOR DO TITULO"] || d["VALOR DO PAGAMENTO"] || '0';
+  const valorDesconto = d["VALOR DO DESCONTO"] || '0';
+  const valorMora = d["VALOR DA MORA"] || '0';
+  const valorPagamento = d["VALOR DO PAGAMENTO"] || valorTitulo || '0';
+  
+  s+=padLeft(cents(valorTitulo),15); // 100-114 Valor Nominal
+  s+=padLeft(cents(valorDesconto),15);       // 115-129 Desconto
+  s+=padLeft(cents(valorMora),15);       // 130-144 Multa
   s+=fmtDate(d["DATA DO PAGAMENTO"]);    // 145-152 Data Pagamento
-  s+=padLeft(cents(d["VALOR DO PAGAMENTO"]),15); // 153-167 Valor Pagamento
+  s+=padLeft(cents(valorPagamento),15); // 153-167 Valor Pagamento
   s+=padLeft('0',15);       // 168-182 Quantidade Moeda
   s+=padRight(d["SEU NUMERO"]||'',20); // 183-202 Documento Cliente
   s+=padRight('',20);       // 203-222 Documento Banco
